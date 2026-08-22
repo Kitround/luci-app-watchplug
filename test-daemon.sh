@@ -267,11 +267,14 @@ echo "ok: chain mode waited ${gap}s before the second device"
 grep -Fv 'watchplug.main.device_mode=chain' "$CFG" >"$CFG.new" && mv "$CFG.new" "$CFG"
 
 echo "# custom preset: placeholders expanded, password never logged"
+# The stub echoes the request back, the way a CGI script answering "unknown request:
+# ..." does. The URL is not the only thing carrying the password into the log: the
+# reply the device sends is served to whoever opens the Logs tab too.
 cat >"$tmp/bin/uclient-fetch" <<EOF
 #!/bin/sh
 for a in "\$@"; do url=\$a; done
 echo "\$(date +%s) \$url" >>"$FETCHLOG"
-echo OK
+echo "unknown request: \$url"
 EOF
 chmod +x "$tmp/bin/uclient-fetch"
 cat >>"$CFG" <<'EOF'

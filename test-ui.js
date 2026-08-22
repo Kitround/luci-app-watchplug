@@ -413,8 +413,6 @@ console.log('# nothing driven by data is injected as raw HTML');
 		'a device name is shown as the text it is');
 }
 
-// --- notifications ----------------------------------------------------------
-
 // --- rpc surface ------------------------------------------------------------
 
 console.log('# rpc');

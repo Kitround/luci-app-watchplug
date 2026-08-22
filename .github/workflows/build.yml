@@ -7,10 +7,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The release job attaches packages to the tag, which the default read-only token
-# is not allowed to do.
+# Read-only by default -- including for the SDK build, which runs a third-party
+# action pinned to a moving branch. Only the release job, which runs nothing but
+# download-artifact and the release upload, is given the write token it needs to
+# attach packages to the tag.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -88,6 +90,8 @@ jobs:
     if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:

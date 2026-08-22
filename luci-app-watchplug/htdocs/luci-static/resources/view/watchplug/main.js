@@ -209,8 +209,11 @@ function refresh() {
 		// The buttons depend on the status too — the cycle confirmation quotes the
 		// off time, and Rearm only shows with the cap on. Rebuilt so they follow a
 		// settings change instead of freezing at whatever was loaded with the page.
+		// Not while something in there holds focus: the 5 s poll would otherwise pull
+		// the node out from under a keyboard user's tab stop, and take with it the
+		// spinner ui.createHandlerFn put on the button whose command is still running.
 		var ac = document.getElementById('watchplug-actions');
-		if (ac)
+		if (ac && !ac.contains(document.activeElement))
 			ac.parentNode.replaceChild(renderActions(res[0]), ac);
 
 		var lg = document.getElementById('watchplug-logs');

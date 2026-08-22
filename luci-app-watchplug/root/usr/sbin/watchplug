@@ -248,9 +248,21 @@ mask() {
 	_m=$(echo "$1" | sed -e 's/password=[^&]*/password=***/g')
 	for _p in "$plug_password" "$(urlencode "$plug_password")"; do
 		[ -n "$_p" ] || continue
-		case "$_m" in
-		*"$_p"*) _m="${_m%%"$_p"*}***${_m#*"$_p"}" ;;
-		esac
+		# Every occurrence, not just the first: one URL can carry the secret twice
+		# -- "http://user:pass@host/x?pw=pass" is one call -- and a single one left
+		# behind is the whole leak. What has already been masked is moved out of the
+		# way rather than rescanned, so a password of "***" cannot loop forever.
+		_done=
+		while :; do
+			case "$_m" in
+			*"$_p"*)
+				_done="$_done${_m%%"$_p"*}***"
+				_m=${_m#*"$_p"}
+				;;
+			*) break ;;
+			esac
+		done
+		_m="$_done$_m"
 	done
 	echo "$_m"
 }
@@ -326,8 +338,18 @@ http_get() {
 	# The log is trimmed by lines, not by bytes, and it lives in RAM: one chatty or
 	# hostile device answering a megabyte would fill the tmpfs and push the "logs"
 	# ubus reply past the message size limit, taking the Logs tab down with it.
-	[ "$http_quiet" = 1 ] ||
-		act "[http ] $(mask "$1") -> $(printf '%s' "${_out:-<no reply, rc=$_rc>}" | head -c 200 | tr -d '\n')"
+	#
+	# ponytail: only the *log* line is bounded, not $_out. Reading the body through
+	# "head -c" would bound it, at the cost of the fetch's exit status -- and an
+	# empty 200, which plenty of relay APIs answer with, would then read as a failed
+	# cycle. Bound it in the fetcher, not in the pipe, if a device ever needs it.
+	# The reply goes through mask() as well as the URL: a device is free to echo the
+	# request back at us ("unknown command: /relay?pw=..."), and the activity log is
+	# served to whoever opens the LuCI tab.
+	if [ "$http_quiet" != 1 ]; then
+		_body=$(printf '%s' "${_out:-<no reply, rc=$_rc>}" | head -c 200 | tr -d '\n')
+		act "[http ] $(mask "$1") -> $(mask "$_body")"
+	fi
 	printf '%s' "$_out"
 	return $_rc
 }
@@ -381,11 +403,14 @@ device_power() { # device_power on|off
 	if [ "$preset" = tasmota ]; then
 		_r=$(tasmota "$relay $1") || return 1
 		if ! reply_ok "$_r"; then
-			log err "device $(device_label) refused '$relay $1': ${_r:-no reply}"
-			echo "${_r:-no reply from $(device_label)}"
+			log err "device $(device_label) refused '$relay $1': $(mask "${_r:-no reply}")"
+			mask "${_r:-no reply from $(device_label)}"
 			return 1
 		fi
-		echo "$_r"
+		# Masked on the way out too: this reply is quoted back at the user in a LuCI
+		# banner, and a device that echoes the query it was sent hands the password
+		# straight to the page. The parsed copy poll_device() reads is untouched.
+		mask "$_r"
 		return 0
 	fi
 
@@ -401,7 +426,10 @@ device_power() { # device_power on|off
 		echo "no URL configured for '$1'" >&2
 		return 1
 	fi
-	http_get "$(expand_url "$_u")"
+	_r=$(http_get "$(expand_url "$_u")")
+	_prc=$?
+	mask "$_r"
+	return $_prc
 }
 
 poll_device() {
@@ -448,9 +476,30 @@ poll_device() {
 		# Without PowerOnState=1, a mains outage during the off window leaves the
 		# controlled equipment dead for good.
 		if [ "$enforce_pos" = 1 ] && [ "$plug_pos" != '?' ] && [ "$plug_pos" != 1 ]; then
-			log warn "PowerOnState=$plug_pos forced to 1 (otherwise the device stays off after a mains outage)"
 			http_quiet=0
-			tasmota "PowerOnState 1" >/dev/null 2>&1 && plug_pos=1
+			# reply_ok, not a bare 2xx: Tasmota answers 200 to a command it refused,
+			# and reporting a fix that never happened is worse than reporting none.
+			if reply_ok "$(tasmota "PowerOnState 1")"; then
+				log warn "device $(device_label): PowerOnState was $plug_pos, forced to 1 (otherwise it stays off after a mains outage)"
+				plug_pos=1
+				case " $pos_warned " in
+				*" $dev_section "*)
+					pos_warned="${pos_warned%%"$dev_section"*}${pos_warned#*"$dev_section"}"
+					;;
+				esac
+			else
+				# Once per device per transition, like the state-query refusal above:
+				# a device that keeps refusing would otherwise write one line to
+				# syslog on every tick and evict every other subsystem from the
+				# router's 64 KB ring buffer inside a day.
+				case " $pos_warned " in
+				*" $dev_section "*) ;;
+				*)
+					log err "device $(device_label) refused PowerOnState 1 and stays at $plug_pos -- a mains outage during the off window would leave the equipment dead"
+					pos_warned="$pos_warned $dev_section"
+					;;
+				esac
+			fi
 		fi
 	elif [ -n "$url_state" ]; then
 		_reply=$(http_get "$(expand_url "$url_state")")
@@ -472,7 +521,7 @@ do_cycle() {
 	if [ "$preset" = tasmota ]; then
 		_r=$(tasmota "Backlog ${relay} off; Delay $((off_time * 10)); ${relay} on")
 		if ! reply_ok "$_r"; then
-			log err "device $(device_label) refused the cycle command: ${_r:-no reply}. Check the relay name and, if Tasmota web authentication is on, the credentials."
+			log err "device $(device_label) refused the cycle command: $(mask "${_r:-no reply}"). Check the relay name and, if Tasmota web authentication is on, the credentials."
 			return 1
 		fi
 	elif [ -n "$url_cycle" ]; then
@@ -750,11 +799,11 @@ tick() {
 }
 
 daemon() {
-	# The outage clock survives a restart. Saving anything in LuCI fires the config
-	# reload trigger, which procd turns into a restart since there is no
-	# reload_service: without this, adjusting one field 19 minutes into a 20 minute
-	# down_time would silently start the countdown over. The state file lives in
-	# tmpfs, so a real reboot still starts clean -- which is what boot_delay is for.
+	# The outage clock survives a restart: without this, anything that restarts the
+	# daemon 19 minutes into a 20 minute down_time would silently start the countdown
+	# over. A LuCI save no longer does (init.d defines reload_service), but procd's
+	# respawn, an upgrade and a plain "/etc/init.d/watchplug restart" all still do.
+	# The state file lives in tmpfs, so a real reboot starts clean -- boot_delay's job.
 	_prev=$(cat "$STATE_FILE" 2>/dev/null)
 	down_since=$(json_field "$_prev" down_since)
 	cooldown_until=$(json_field "$_prev" cooldown_until)
@@ -766,6 +815,7 @@ daemon() {
 	plug_pos='?'
 	plug_err=''
 	warned_devices=''
+	pos_warned=''
 	devices_json=''
 	devices_sum=''
 	device_count=0
@@ -839,6 +889,17 @@ selftest() {
 	plug_password='a&b'
 	assert_eq "$(mask 'http://h/relay?pw=a%26b&on=1')" \
 		'http://h/relay?pw=***&on=1' "masked once percent-encoded too"
+	# One URL can carry the secret more than once -- userinfo plus a query parameter,
+	# or a template naming {password} twice. Masking only the first is still a leak.
+	plug_password='s3cr3t'
+	assert_eq "$(mask 'http://h/x?a=s3cr3t&b=s3cr3t&c=s3cr3t')" \
+		'http://h/x?a=***&b=***&c=***' "every occurrence is masked, not just the first"
+	plug_password='a&b'
+	assert_eq "$(mask 'http://admin:a&b@h/x?pw=a&b')" \
+		'http://admin:***@h/x?pw=***' "both spellings, both occurrences"
+	plug_password='***'
+	assert_eq "$(mask 'http://h/x?pw=***&on=1')" \
+		'http://h/x?pw=***&on=1' "a password that looks like the mask does not loop"
 	plug_password=
 
 	assert_eq "$(urlencode 'Backlog Power off; Delay 300; Power on')" \
@@ -953,10 +1014,12 @@ daemon)
 	;;
 check)
 	load_config
+	# check_detail, not just the device: it is the only place the reason is said, and
+	# it is what the LuCI "Check now" banner shows.
 	if check_conn; then
-		echo "online via ${wan_device}"
+		echo "online -- ${check_detail}"
 	else
-		echo "offline (${wan_device:-no device}) ${message}"
+		echo "offline -- ${check_detail:-${message:-no check performed}}"
 		exit 1
 	fi
 	;;
@@ -1024,9 +1087,9 @@ fix-poweronstate)
 		load_device "$s"
 		[ "$preset" = tasmota ] || continue
 		device_configured || continue
-		tasmota "PowerOnState 1" && rc=0
+		reply_ok "$(tasmota "PowerOnState 1")" && rc=0
 	done
-	[ "$rc" = 0 ] || echo "PowerOnState is a Tasmota feature, no Tasmota device to fix" >&2
+	[ "$rc" = 0 ] || echo "no Tasmota device accepted PowerOnState 1 -- none configured, or the relay name or credentials are wrong" >&2
 	exit $rc
 	;;
 selftest) selftest ;;
