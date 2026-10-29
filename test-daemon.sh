@@ -422,6 +422,35 @@ sh "$MIG" >/dev/null 2>&1
 	echo "FAIL: running the migration twice changed the config again" >&2; exit 1; }
 echo "ok: running it twice is a no-op"
 
+echo "# a due cycle does not wait for the next check"
+# interval 30s, down_time 2s: the cycle has to fire when the countdown ends, not one
+# whole interval after the outage was seen.
+cat >"$CFG" <<'EOF'
+watchplug.main=watchplug
+watchplug.main.enabled=1
+watchplug.main.interval=30s
+watchplug.main.targets=192.0.2.1
+watchplug.main.wan_iface=wan
+watchplug.main.ping_count=1
+watchplug.main.ping_timeout=1s
+watchplug.main.down_time=2s
+watchplug.main.boot_delay=0
+watchplug.main.recovery_grace=1s
+watchplug.@device[0]=device
+watchplug.@device[0].name=plugA
+watchplug.@device[0].host=192.0.2.9
+watchplug.@device[0].relay=Power
+watchplug.@device[0].off_time=1
+EOF
+rm -f "$NETUP" "$tmp/watchplug.json" "$tmp/watchplug.cycles"
+"$BIN" daemon &
+pid=$!
+expect 3 degraded
+expect 8 cooldown
+echo "ok: cycled when the countdown ended, well inside the 30s interval"
+kill $pid 2>/dev/null
+pid=
+
 echo "# clearing the log empties it and says so"
 "$BIN" clear-logs >/dev/null
 [ "$(grep -c . "$LOG")" -eq 1 ] || {

@@ -824,7 +824,13 @@ daemon() {
 	while :; do
 		load_config
 		tick
-		sleep "$interval"
+		# A countdown ending before the next check wakes the daemon when it ends, or a
+		# 5 min interval would hold a due cycle (or the end of the grace period) back by
+		# up to 5 min. Never on eta 0 -- a boot hold or a cycle nothing took -- which
+		# would turn the loop into a busy loop.
+		_nap=$interval
+		[ "$eta" -gt 0 ] && [ "$eta" -lt "$_nap" ] && _nap=$eta
+		sleep "$_nap"
 	done
 }
 

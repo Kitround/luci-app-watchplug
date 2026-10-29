@@ -141,6 +141,11 @@ function renderStatus(st) {
 	    now = Date.now() / 1000,
 	    interval = parseInt(st.interval) || 60,
 	    stale = !st.last_check || (now - st.last_check) > Math.max(180, 3 * interval),
+	    // The daemon writes down_for and eta once per check, which can be minutes apart;
+	    // aged here so the 5 s poll counts them live instead of freezing for an interval.
+	    // Not once stale: a dead service is not counting anything down.
+	    age = stale ? 0 : Math.max(0, Math.floor(now - st.last_check)),
+	    eta = parseInt(st.eta) >= 0 ? Math.max(0, st.eta - age) : -1,
 	    rows = [];
 
 	rows.push(row(_('State'),
@@ -157,12 +162,14 @@ function renderStatus(st) {
 		st.wan_device ? ' (%s)'.format(st.wan_device) : ' — ' + _('no active device'))));
 
 	if (st.state == 'degraded' || st.state == 'cooldown' || st.state == 'blocked') {
-		rows.push(row(_('Offline for'), duration(st.down_for)));
+		rows.push(row(_('Offline for'), duration((parseInt(st.down_for) || 0) + age)));
+		// The daemon wakes when the countdown ends, so zero means the cycle is under way;
+		// a hold or a refusal at that point is spelled out in the Info row.
 		if (st.state == 'degraded')
-			rows.push(row(_('Cycling device in'), duration(st.eta) +
+			rows.push(row(_('Cycling device in'), (eta == 0 ? _('now') : duration(eta)) +
 				(st.backoff == 1 ? ' ' + _('(spacing now %s)').format(duration(st.threshold)) : '')));
 		else if (st.state == 'cooldown')
-			rows.push(row(_('Grace period ends in'), duration(st.eta)));
+			rows.push(row(_('Grace period ends in'), duration(eta)));
 	}
 
 	rows.push(row(_('Last check'), stamp(st.last_check)));

@@ -168,7 +168,10 @@ function loadView(env) {
 		Object.defineProperty(String.prototype, 'format', {
 			value: function (...args) {
 				let i = 0;
-				return this.replace(/%[sd]/g, m => (m === '%d' ? String(parseInt(args[i++])) : String(args[i++])));
+				return this.replace(/%(0\d)?([sd])/g, (m, pad, t) => {
+					const v = t === 'd' ? String(parseInt(args[i++])) : String(args[i++]);
+					return pad ? v.padStart(parseInt(pad), '0') : v;
+				});
 			}
 		});
 	global.L = env.L;
@@ -377,6 +380,22 @@ console.log('# status table');
 	ok(/one after another/.test(t), 'chain mode is spelled out');
 	ok(/1 \/ 3/.test(t), 'the 24h count is shown when the cap is on');
 	ok(!/off 15s per cycle/.test(t), 'per-device detail is not duplicated here');
+}
+
+console.log('# status table: the outage counters run between checks');
+{
+	// The daemon may only write every few minutes; the page polls every 5 s and has
+	// to count from the last check, not show the value that check wrote.
+	const st = JSON.parse(JSON.stringify(STATUS));
+	st.last_check = Math.floor(Date.now() / 1000) - 120;
+	const t = text(page({}, st).status);
+	ok(/7min 0[0-2]s/.test(t), 'offline for has aged since the last check');
+	ok(/13min 00s|12min 5\ds/.test(t), 'the cycle countdown has aged too');
+
+	st.last_check -= 900;
+	st.interval = 600;
+	ok(/Cycling device in\s*now/.test(text(page({}, st).status)),
+		'a countdown past zero reads as under way instead of going negative');
 }
 
 console.log('# status table: a stale state file is called out');
